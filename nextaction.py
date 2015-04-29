@@ -13,16 +13,21 @@ import urllib2
 import threading
 
 NEXT_ACTION_LABEL = u'next_action'
-NOT_STARTED = u'not_started'
+NOT_STARTED_LABEL = u'not_started'
 args = None
 
 class TraversalState(object):
   """Simple class to contain the state of the item tree traversal."""
-  def __init__(self, next_action_label_id):
+  def __init__(self, next_action_label_id, not_started_label_id):
     self.remove_labels = []
     self.add_labels = []
     self.found_next_action = False
     self.next_action_label_id = next_action_label_id
+    
+    self.remove_labels_not_started = []
+    self.add_labels_not_started = []
+    self.found_not_started = False
+    self.not_started_label_id = not_started_label_id
 
   def clone(self):
     """Perform a simple clone of this state object.
@@ -30,8 +35,9 @@ class TraversalState(object):
     For parallel traversals it's necessary to produce copies so that every
     traversal to a lower node has the same found_next_action status.
     """
-    t = TraversalState(self.next_action_label_id)
+    t = TraversalState(self.next_action_label_id, self.not_started_label_id)
     t.found_next_action = self.found_next_action
+    t.found_not_started = self.found_not_started
     return t
 
   def merge(self, other):
@@ -44,6 +50,10 @@ class TraversalState(object):
     self.remove_labels += other.remove_labels
     self.add_labels += other.add_labels
 
+    if other.found_not_started:
+      self.found_not_started = True
+    self.remove_labels_not_started += other.remove_labels_not_started
+    self.add_labels_not_started += other.add_labels_not_started
 
 class Item(object):
   def __init__(self, initial_data):
@@ -79,6 +89,15 @@ class Item(object):
       elif not args.use_priority and state.next_action_label_id in self.labels:
         state.remove_labels.append(self)
 
+    if not state.found_not_started and not self.checked:
+      state.found_not_started = True
+    else:
+      t1 = datetime.datetime.utcnow().replace(tzinfo=None)
+      t2 = self.due_date_utc.replace(tzinfo=None)
+      tDiff = t1 - t2
+      if tDiff.total_seconds() < 3600:
+        state.remove_labels_not_started.append(self)
+    
   def SortChildren(self):
     # Sorting by priority and date seemed like a good idea at some point, but
     # that has proven wrong. Don't sort.
@@ -91,6 +110,13 @@ class Item(object):
       state.remove_labels.append(self)
     for item in self.children:
       item.GetLabelRemovalMods(state)
+                                      
+  def GetNotStartedLabelRemovalMods(self, state):
+    '''Not started label'''
+    if state.not_started_label_id in self.labels:
+      state.remove_labels_not_started.append(self)
+    for item in self.children:
+      item.GetNotStartedLabelRemovalMods(state)
 
   def _SequentialItemMods(self, state):
     """
@@ -158,6 +184,8 @@ class Project(object):
     else: # Remove all next_action labels in this project.
       for item in self.children:
         item.GetLabelRemovalMods(state)
+    for item in self.children:
+      item.GetNotStartedLabelRemovalMods(state)
 
   def AddItem(self, item):
     '''Collect unsorted child items
@@ -224,13 +252,19 @@ class TodoistData(object):
     if 'Labels' not in label_data:
       logging.debug("Label data not found, wasn't updated.")
       return
-    # Store label data - we need this to set the next_action label.
+    # Store label data - we need this to set the next_action
+    # and removing the not_started label.
     for label in label_data['Labels']:
       if label['name'] == NEXT_ACTION_LABEL:
         self._next_action_id = label['id']
         logging.info('Found next_action label, id: %s', label['id'])
+      if label['name'] == NOT_STARTED_LABEL:
+        self._not_started_id = label['id']
+        logging.info('Found not_started label, id: %s', label['id'])
     if self._next_action_id == None:
         logging.warning('Failed to find next_action label, need to create it.')
+    if self._not_started_id == None:
+      logging.warning('Failed to find not_started label, need to create it.')
 
   def GetSyncState(self):
     return {'seq_no': self._seq_no}
@@ -266,6 +300,7 @@ class TodoistData(object):
   def GetProjectMods(self):
     mods = []
     # We need to create the next_action label
+    # Assume not_started label exists
     if self._next_action_id == None and not args.use_priority:
       self._next_action_id = '$%d' % int(time.time())
       mods.append({'type': 'label_register',
@@ -282,7 +317,7 @@ class TodoistData(object):
       logging.info("Adding next_action label")
       return mods
     for project in self._projects.itervalues():
-      state = TraversalState(self._next_action_id)
+      state = TraversalState(self._next_action_id, self._not_started_id)
       project.GetItemMods(state)
       if len(state.add_labels) > 0 or len(state.remove_labels) > 0:
         logging.info("For project %s, the following mods:", project.name)
@@ -319,6 +354,10 @@ class TodoistData(object):
           item.labels.remove(self._next_action_id)
           m['args']['labels'] = item.labels
         logging.info("remove next_action from: %s", item.content)
+      for item in state.remove_labels_not_started:
+        m = self.MakeNewMod(item)
+        mods.append(m)
+        item.labels.remove(self._not_started_id)
     return mods
 
   @staticmethod
@@ -358,29 +397,33 @@ def main():
   args = parser.parse_args()
   args.api_token = 'b0e305163aa0739a9cde45c0db6011158b7498f5'
   logging.basicConfig(level=logging.DEBUG)
+
+  # Get response data from server given api_token
   response = GetResponse(args.api_token)
   initial_data = response.read()
   logging.debug("Got initial data: %s", initial_data)
+  
   initial_data = json.loads(initial_data)
   a = TodoistData(initial_data)
-  while True:
-    try: 
-      mods = a.GetProjectMods()
-      if len(mods) == 0:
-        time.sleep(5)
-      else:
-        logging.info("* Modifications necessary - skipping sleep cycle.")
-      logging.info("** Beginning sync")
-      sync_state = a.GetSyncState()
-      changed_data = DoSyncAndGetUpdated(args.api_token,mods, sync_state).read()
-      logging.debug("Got sync data %s", changed_data)
-      changed_data = json.loads(changed_data)
-      logging.info("* Updating model after receiving sync data")
-      a.UpdateChangedData(changed_data)
-      logging.info("* Finished updating model")
-      logging.info("** Finished sync")
-    except:
-      print "Network error, try again.."
+  #while True:
+  #try: 
+
+  mods = a.GetProjectMods()
+  if len(mods) == 0:
+    time.sleep(5)
+  else:
+    logging.info("* Modifications necessary - skipping sleep cycle.")
+  logging.info("** Beginning sync")
+  sync_state = a.GetSyncState()
+  changed_data = DoSyncAndGetUpdated(args.api_token,mods, sync_state).read()
+  logging.debug("Got sync data %s", changed_data)
+  changed_data = json.loads(changed_data)
+  logging.info("* Updating model after receiving sync data")
+  a.UpdateChangedData(changed_data)
+  logging.info("* Finished updating model")
+  logging.info("** Finished sync")
+  #except:
+  #  print "Network error, try again.."
 
 if __name__ == '__main__':
   main()
