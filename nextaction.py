@@ -392,37 +392,36 @@ def DoSyncAndGetUpdated(api_token, items_to_sync, sync_state):
 
 def main():
   parser = argparse.ArgumentParser(description='Add NextAction labels to Todoist.')
-  parser.add_argument('--api_token', required=False, help='Your API key')
+  parser.add_argument('--api_token', required=True, help='Your API key')
   parser.add_argument('--use_priority', required=False,
       action="store_true", help='Use priority 1 rather than a label to indicate the next actions.')
   global args
   args = parser.parse_args()
-  args.api_token = 'b0e305163aa0739a9cde45c0db6011158b7498f5'
   logging.basicConfig(level=logging.DEBUG)
   response = GetResponse(args.api_token)
   initial_data = response.read()
   logging.debug("Got initial data: %s", initial_data)
   initial_data = json.loads(initial_data)
   a = TodoistData(initial_data)
-  #while True:
-  #try:   
-  mods = a.GetProjectMods()
-  if len(mods) == 0:
-    time.sleep(5)
-  else:
-    logging.info("* Modifications necessary - skipping sleep cycle.")
-  #mods2 = a.GetProjectMods2()
-  logging.info("** Beginning sync")
-  sync_state = a.GetSyncState()
-  changed_data = DoSyncAndGetUpdated(args.api_token,mods, sync_state).read()
-  logging.debug("Got sync data %s", changed_data)
-  changed_data = json.loads(changed_data)
-  logging.info("* Updating model after receiving sync data")
-  a.UpdateChangedData(changed_data)
-  logging.info("* Finished updating model")
-  logging.info("** Finished sync")
-    #except:
-     # print "Network error, try again.."
+  while True:
+    try:   
+      mods = a.GetProjectMods()
+      if len(mods) == 0:
+        time.sleep(5)
+      else:
+        logging.info("* Modifications necessary - skipping sleep cycle.")
+      #mods2 = a.GetProjectMods2()
+      logging.info("** Beginning sync")
+      sync_state = a.GetSyncState()
+      changed_data = DoSyncAndGetUpdated(args.api_token,mods, sync_state).read()
+      logging.debug("Got sync data %s", changed_data)
+      changed_data = json.loads(changed_data)
+      logging.info("* Updating model after receiving sync data")
+      a.UpdateChangedData(changed_data)
+      logging.info("* Finished updating model")
+      logging.info("** Finished sync")
+    except:
+      print "Network error, try again.."
 
 if __name__ == '__main__':
   main()
